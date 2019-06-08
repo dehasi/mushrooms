@@ -1,25 +1,25 @@
 package me.dehasi.mushrooms;
 
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.nio.file.Paths;
-import java.text.NumberFormat;
-import java.text.ParseException;
-import java.util.Locale;
-import java.util.Scanner;
-import java.util.UUID;
 import org.apache.ignite.Ignite;
 import org.apache.ignite.IgniteCache;
 import org.apache.ignite.Ignition;
 import org.apache.ignite.cache.affinity.rendezvous.RendezvousAffinityFunction;
 import org.apache.ignite.configuration.CacheConfiguration;
-import org.apache.ignite.ml.math.exceptions.knn.FileParsingException;
-import org.apache.ignite.ml.math.functions.IgniteBiFunction;
+import org.apache.ignite.ml.dataset.feature.extractor.Vectorizer;
+import org.apache.ignite.ml.dataset.feature.extractor.impl.DummyVectorizer;
 import org.apache.ignite.ml.math.primitives.vector.Vector;
-import org.apache.ignite.ml.math.primitives.vector.VectorUtils;
-import org.apache.ignite.ml.naivebayes.discrete.DiscreteNaiveBayesModel;
+import org.apache.ignite.ml.math.primitives.vector.impl.DenseVector;
 import org.apache.ignite.ml.naivebayes.discrete.DiscreteNaiveBayesTrainer;
-import org.apache.ignite.ml.selection.scoring.evaluator.BinaryClassificationEvaluator;
+import org.apache.ignite.ml.pipeline.Pipeline;
+import org.apache.ignite.ml.pipeline.PipelineMdl;
+import org.apache.ignite.ml.preprocessing.encoding.EncoderTrainer;
+import org.apache.ignite.ml.preprocessing.encoding.EncoderType;
+import org.apache.ignite.ml.selection.scoring.evaluator.Evaluator;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.util.Scanner;
+import java.util.UUID;
 
 public class MushroomsMain {
 
@@ -32,29 +32,35 @@ public class MushroomsMain {
 
             IgniteCache<Integer, Vector> dataCache = createCacheWith(ignite);
 
-            double[][] thresholds = createThresholds(23);
+            int featuresCount = 3;
+            double[][] thresholds = createThresholds(featuresCount);
             System.out.println(">>> Create new Discrete naive Bayes classification trainer object.");
-            DiscreteNaiveBayesTrainer trainer = new DiscreteNaiveBayesTrainer()
-                .setBucketThresholds(thresholds);
 
             System.out.println(">>> Perform the training to get the model.");
-            IgniteBiFunction<Integer, Vector, Vector> featureExtractor = (k, v) -> v.copyOfRange(1, v.size());
-            IgniteBiFunction<Integer, Vector, Double> lbExtractor = (k, v) ->  v.get(0) < 'f'? 1.:0.;
 
-            DiscreteNaiveBayesModel mdl = trainer.fit(
-                ignite,
-                dataCache,
-                featureExtractor,
-                lbExtractor
-            );
+
+            Vectorizer<Integer, Vector, Integer, String> vectorizer = new MyVectorizer<Integer, String>(1, 2)
+                    .zero("").labeled(Vectorizer.LabelCoordinate.FIRST);
+
+
+
+            PipelineMdl<Integer, Vector> mdl = new Pipeline<Integer, Vector, Integer, String>()
+                    .addVectorizer(vectorizer)
+                    .addPreprocessingTrainer(new EncoderTrainer<Integer, Vector>()
+                            .withEncoderType(EncoderType.STRING_ENCODER)
+                            .withEncodedFeature(0)
+                            .withEncodedFeature(1)
+                            .withEncodedFeature(2))
+                    .addTrainer(new DiscreteNaiveBayesTrainer().setBucketThresholds(thresholds))
+                    .fit(ignite, dataCache);
+
 
             System.out.println(">>> Discrete Naive Bayes model: " + mdl);
 
-            double accuracy = BinaryClassificationEvaluator.evaluate(
-                dataCache,
-                mdl,
-                featureExtractor,
-                lbExtractor
+            double accuracy = Evaluator.evaluate(
+                    dataCache,
+                    mdl,
+                    vectorizer
             ).accuracy();
 
             System.out.println("\n>>> Accuracy " + accuracy);
@@ -63,20 +69,20 @@ public class MushroomsMain {
         }
     }
 
-    public IgniteCache<Integer, Vector> createCacheWith(Ignite ignite) throws FileNotFoundException {
+    private IgniteCache<Integer, Vector> createCacheWith(Ignite ignite) throws FileNotFoundException {
 
         IgniteCache<Integer, Vector> cache = getCache(ignite);
 
-        String fileName = "mushrooms.csv";
+        String fileName = "mushrooms_cut.csv";
 
         ClassLoader classLoader = this.getClass().getClassLoader();
         File file = new File(classLoader.getResource(fileName).getFile());
 
-        if (file == null)
+        if (!file.exists())
             throw new FileNotFoundException(fileName);
 
         Scanner scanner = new Scanner(file);
-        boolean hasHeader = true;
+        boolean hasHeader = false;
         int cnt = 0;
         while (scanner.hasNextLine()) {
             String row = scanner.nextLine();
@@ -85,28 +91,10 @@ public class MushroomsMain {
                 continue;
             }
 
-            String[] cells = row.split(",");
+            String[] data = row.split(",");
 
-            double[] data = new double[cells.length];
-            NumberFormat format = NumberFormat.getInstance(Locale.FRANCE);
 
-            for (int i = 0; i < cells.length; i++)
-                try {
-                    if (cells[i].equals("?") || cells[i].equals(""))
-//                        data[i] = Double.NaN;
-                        continue;
-                    else
-                        data[i] = Double.valueOf(cells[i].charAt(0));
-                }
-                catch (java.lang.NumberFormatException e) {
-                    try {
-                        data[i] = format.parse(cells[i]).doubleValue();
-                    }
-                    catch (ParseException e1) {
-                        throw new FileParsingException(cells[i], i, Paths.get(fileName));
-                    }
-                }
-            cache.put(cnt++, VectorUtils.of(data));
+            cache.put(cnt++, new DenseVector(data));
         }
         return cache;
 
